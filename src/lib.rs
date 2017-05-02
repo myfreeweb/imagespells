@@ -4,4 +4,5 @@ extern crate image;
 #[cfg(feature = "png")] extern crate oxipng;
 #[cfg(feature = "webp")] extern crate libwebp_sys;
 
+pub mod meta;
 #[cfg(feature = "jpeg")] pub mod jpeg;

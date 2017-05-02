@@ -1,7 +1,8 @@
-use std::{mem, ptr, cell};
+use std::{mem, ptr, cell, slice};
 use std::io::{BufRead};
 use image::*;
 use mozjpeg_sys::*;
+use meta::*;
 
 struct ClientData<R> {
     reader: R,
@@ -78,8 +79,10 @@ impl<R: BufRead> MozJPEGDecoder<R> {
     fn ensure_header(&mut self) {
         if !self.header_read {
             unsafe {
-                jpeg_save_markers(&mut self.cinfo, jpeg_marker::APP0 as i32 + 1, 0xffff); // Exif/XMP
-                jpeg_save_markers(&mut self.cinfo, jpeg_marker::APP0 as i32 + 2, 0xffff); // ICC
+                jpeg_save_markers(&mut self.cinfo, jpeg_marker::COM as i32, 0xffff);       // Comments
+                jpeg_save_markers(&mut self.cinfo, jpeg_marker::APP0 as i32 + 1, 0xffff);  // Exif/XMP
+                jpeg_save_markers(&mut self.cinfo, jpeg_marker::APP0 as i32 + 2, 0xffff);  // ICC
+                jpeg_save_markers(&mut self.cinfo, jpeg_marker::APP0 as i32 + 13, 0xffff); // IPTC
                 jpeg_read_header(&mut self.cinfo, true as boolean);
                 jpeg_start_decompress(&mut self.cinfo);
             }
@@ -97,6 +100,32 @@ impl<R> Drop for MozJPEGDecoder<R> {
     #[inline]
     fn drop(&mut self) {
         unsafe { jpeg_destroy_decompress(&mut self.cinfo) }
+    }
+}
+
+impl<R: BufRead> MetadataDecoder for MozJPEGDecoder<R> {
+    fn raw_metadata(&mut self) -> Vec<(MetadataType, &[u8])> {
+        self.ensure_header();
+        let mut marker : *mut jpeg_marker_struct = self.cinfo.marker_list;
+        let mut result = Vec::new();
+        while marker != ptr::null_mut() {
+            unsafe {
+                let t = if (*marker).marker == jpeg_marker::COM as u8 {
+                    MetadataType::Comment
+                } else if (*marker).marker == jpeg_marker::APP0 as u8 + 1 {
+                    MetadataType::ExifXmp
+                } else if (*marker).marker == jpeg_marker::APP0 as u8 + 2 {
+                    MetadataType::Icc
+                } else if (*marker).marker == jpeg_marker::APP0 as u8 + 13 {
+                    MetadataType::Iptc
+                } else {
+                    MetadataType::Unknown
+                };
+                result.push((t, slice::from_raw_parts((*marker).data, (*marker).data_length as usize)));
+                marker = (*marker).next;
+            }
+        }
+        result
     }
 }
 
@@ -143,7 +172,9 @@ impl<R: BufRead> ImageDecoder for MozJPEGDecoder<R> {
                 buf.set_len(old_len + stride as usize);
             };
         }
-        unsafe { jpeg_finish_decompress(&mut self.cinfo); }
+        //unsafe { jpeg_finish_decompress(&mut self.cinfo); }
+        // XXX: jpeg_finish_decompress prevents reading image after reading metadata?!
+        // since desturctor calls jpeg_destroy_decompress anyway, not calling finish is ok?
         Ok(DecodingResult::U8(buf))
     }
 }
@@ -160,6 +191,7 @@ mod tests {
         assert_eq!(dec.dimensions().unwrap(), (4, 4));
         assert_eq!(dec.colortype().unwrap(), ColorType::RGB(8));
         assert_eq!(dec.row_len().unwrap(), 4 * 3);
+        assert_eq!(dec.raw_metadata().first().unwrap(), &(MetadataType::Comment, &b"Created with GIMP"[..]));
         if let DecodingResult::U8(img) = dec.read_image().unwrap() {
             assert_eq!(img[0..3], [232, 193, 238]);
         } else {
