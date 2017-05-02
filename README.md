@@ -6,7 +6,7 @@ A Rust library and a binary executable designed to replace ImageMagick for doing
 
 - [x] Fast (SIMD-accelerated) JPEG decoding with MozJPEG
 - [ ] JPEG resize-on-decode
-- [ ] EXIF metadata extraction from JPEGs
+- [x] EXIF metadata extraction from JPEGs
 - [ ] Fix EXIF stuff (ISO and Unicode) like exiv2 does
 - [ ] Optimized JPEG encoding with MozJPEG
 - [ ] Optimized PNG encoding with oxipng (includes Zopfli compression)

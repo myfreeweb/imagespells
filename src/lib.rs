@@ -1,3 +1,4 @@
+extern crate libc;
 extern crate image;
 #[cfg(feature = "jpeg")] extern crate exif;
 #[cfg(feature = "jpeg")] extern crate mozjpeg_sys;
