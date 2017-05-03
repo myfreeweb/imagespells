@@ -8,7 +8,7 @@ A Rust library and a binary executable designed to replace ImageMagick for doing
 - [ ] JPEG resize-on-decode
 - [x] EXIF metadata extraction from JPEGs
 - [ ] Fix EXIF stuff (ISO and Unicode) like exiv2 does
-- [ ] Optimized JPEG encoding with MozJPEG
+- [x] Optimized JPEG encoding with MozJPEG
 - [ ] Optimized PNG encoding with oxipng (includes Zopfli compression)
 - [ ] WebP decoding with libwebp
 - [ ] WebP resize-on-decode

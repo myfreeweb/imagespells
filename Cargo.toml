@@ -20,6 +20,7 @@ jpeg = ["mozjpeg-sys"]
 libc = "0.2.22"
 image = "0.13.0"
 kamadak-exif = "0.2.1"
-mozjpeg-sys = { version = "0.3.2", optional = true }
+#mozjpeg-sys = { version = "0.3.2", optional = true }
+mozjpeg-sys = { path = "../../pornel/mozjpeg-sys", optional = true }
 #oxipng = { path = "../../shssoichiro/oxipng", optional = true }
 #libwebp-sys = { version = "0.1.0", optional = true }

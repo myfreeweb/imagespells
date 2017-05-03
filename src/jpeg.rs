@@ -1,19 +1,19 @@
 use std::{mem, ptr, cell, slice, fs, ffi};
 use std::os::unix::io::{IntoRawFd};
-//use std::io::{BufRead};
+use std::io::{Write, BufRead};
 use libc;
 use image::*;
 use mozjpeg_sys::*;
 use meta::*;
 use srcs::*;
 
-struct ClientData<R> {
+struct DecClientData<R> {
     reader: R,
     //last_bytes_in_buffer: usize,
 }
 
 pub struct MozJPEGDecoder<R> {
-    cdata: cell::UnsafeCell<ClientData<R>>,
+    cdata: cell::UnsafeCell<DecClientData<R>>,
     err: jpeg_error_mgr,
     cinfo: jpeg_decompress_struct,
     cleanup: Option<fn (&mut MozJPEGDecoder<R>)>,
@@ -26,7 +26,7 @@ extern "C" fn init_source<R>(_: &mut jpeg_decompress_struct) { }
 
 #[allow(mutable_transmutes)]
 extern "C" fn fill_input_buffer<R: BufRead>(cinfo: &mut jpeg_decompress_struct) -> boolean {
-    let cdata = unsafe { &mut *(*(cinfo.common.client_data as *mut cell::UnsafeCell<ClientData<R>>)).get() };
+    let cdata = unsafe { &mut *(*(cinfo.common.client_data as *mut cell::UnsafeCell<DecClientData<R>>)).get() };
     let reader: *mut R = &mut cdata.reader;
     unsafe {
         let diff = cdata.last_bytes_in_buffer - (*cinfo.src).bytes_in_buffer;
@@ -37,7 +37,7 @@ extern "C" fn fill_input_buffer<R: BufRead>(cinfo: &mut jpeg_decompress_struct) 
     match unsafe { (*reader).fill_buf() } {
         Ok(buf) => {
             unsafe {
-                // lol it's just not 'const' in the C code and i have to do *this*
+                // XXX: it's not actually mut
                 (*cinfo.src).next_input_byte = mem::transmute::<&[u8], &mut [u8]>(buf).as_mut_ptr();
                 (*cinfo.src).bytes_in_buffer = buf.len();
                 cdata.last_bytes_in_buffer = buf.len();
@@ -49,7 +49,7 @@ extern "C" fn fill_input_buffer<R: BufRead>(cinfo: &mut jpeg_decompress_struct) 
 }
 
 extern "C" fn skip_input_data<R: BufRead>(cinfo: &mut jpeg_decompress_struct, num_bytes: c_long) {
-    let cdata = unsafe { &mut *(*(cinfo.common.client_data as *mut cell::UnsafeCell<ClientData<R>>)).get() };
+    let cdata = unsafe { &mut *(*(cinfo.common.client_data as *mut cell::UnsafeCell<DecClientData<R>>)).get() };
     cdata.reader.consume(num_bytes as usize);
     unsafe {
         (*cinfo.src).next_input_byte = (*cinfo.src).next_input_byte.offset(num_bytes as isize);
@@ -81,12 +81,12 @@ impl<R> MozJPEGDecoder<R> where R: BufRead {
 }
 */
 
-fn cleanup_fd(dec: &mut MozJPEGDecoder<*mut libc::FILE>) {
+fn cleanup_fd(dec: &mut MozJPEGDecoder<*mut FILE>) {
     unsafe { libc::fclose((*dec.cdata.get()).reader) };
 }
 
-impl DecoderFromFile for MozJPEGDecoder<*mut libc::FILE> {
-    fn for_file(r: fs::File) -> MozJPEGDecoder<*mut libc::FILE> {
+impl DecoderFromFile for MozJPEGDecoder<*mut FILE> {
+    fn for_file(r: fs::File) -> MozJPEGDecoder<*mut FILE> {
         let fd = unsafe { libc::fdopen(r.into_raw_fd(), ffi::CString::new("rb").unwrap().as_ptr()) };
         let mut dec = MozJPEGDecoder::new(fd);
         unsafe { jpeg_stdio_src(&mut dec.cinfo, fd); }
@@ -106,7 +106,7 @@ impl<'a> DecoderFromMemory<'a> for MozJPEGDecoder<&'a [u8]> {
 impl<R> MozJPEGDecoder<R> {
     fn new(r: R) -> MozJPEGDecoder<R> {
         let mut dec = MozJPEGDecoder {
-            cdata: cell::UnsafeCell::new(ClientData {
+            cdata: cell::UnsafeCell::new(DecClientData {
                 reader: r,
                 //last_bytes_in_buffer: 0,
             }),
@@ -228,6 +228,167 @@ impl<R> ImageDecoder for MozJPEGDecoder<R> {
     }
 }
 
+const OUT_BUF_SIZE: usize = 100;
+
+struct EncClientData<W> {
+    writer: W,
+    buffer: [u8; OUT_BUF_SIZE],
+}
+
+pub struct MozJPEGEncoder<W> {
+    cdata: cell::UnsafeCell<EncClientData<W>>,
+    err: jpeg_error_mgr,
+    cinfo: jpeg_compress_struct,
+    cleanup: Option<fn (&mut MozJPEGEncoder<W>)>,
+    pub quality: u8,
+    pub jpgcrush: bool,
+    pub trellis: bool,
+    pub trellis_dc: bool,
+    pub trellis_eob_opt: bool,
+    pub trellis_q_opt: bool,
+    pub trellis_scans: bool,
+    pub deringing: bool,
+}
+
+fn cleanup_fd_enc(enc: &mut MozJPEGEncoder<*mut FILE>) {
+    unsafe { libc::fclose((*enc.cdata.get()).writer) };
+}
+
+impl MozJPEGEncoder<*mut FILE> {
+    pub fn for_file(r: fs::File) -> MozJPEGEncoder<*mut FILE> {
+        let fd = unsafe { libc::fdopen(r.into_raw_fd(), ffi::CString::new("wb").unwrap().as_ptr()) };
+        let mut enc = MozJPEGEncoder::new(fd);
+        unsafe { jpeg_stdio_dest(&mut enc.cinfo, fd); }
+        enc.cleanup = Some(cleanup_fd_enc);
+        enc
+    }
+}
+
+/* XXX: WTF
+extern "C" fn init_destination<W>(cinfo: &mut jpeg_compress_struct) {
+    let cdata = unsafe { &mut *(*(cinfo.common.client_data as *mut cell::UnsafeCell<EncClientData<W>>)).get() };
+    unsafe {
+        (*cinfo.dest).next_output_byte = cdata.buffer.as_mut_ptr();
+        (*cinfo.dest).free_in_buffer = OUT_BUF_SIZE;
+    }
+}
+
+extern "C" fn empty_output_buffer<W: Write>(cinfo: &mut jpeg_compress_struct) -> boolean {
+    let cdata = unsafe { &mut *(*(cinfo.common.client_data as *mut cell::UnsafeCell<EncClientData<W>>)).get() };
+    let writer: *mut W = &mut cdata.writer;
+    if let Ok(()) = unsafe { (*writer).write_all(&cdata.buffer[0..OUT_BUF_SIZE-(*cinfo.dest).free_in_buffer]) } {
+        unsafe {
+            (*cinfo.dest).next_output_byte = cdata.buffer.as_mut_ptr();
+            (*cinfo.dest).free_in_buffer = OUT_BUF_SIZE;
+        }
+    }
+    true as boolean
+}
+
+extern "C" fn term_destination<W: Write>(cinfo: &mut jpeg_compress_struct) {
+    empty_output_buffer::<W>(cinfo);
+}
+
+impl<W: Write> MozJPEGEncoder<W> {
+    pub fn for_writer(w: W) -> MozJPEGEncoder<W> {
+        let fd = unsafe { libc::fdopen(0, ffi::CString::new("wb").unwrap().as_ptr()) };
+        let mut enc = MozJPEGEncoder::new(w);
+        unsafe {
+            jpeg_stdio_dest(&mut enc.cinfo, fd);
+            (*enc.cinfo.dest).init_destination = Some(init_destination::<W>);
+            (*enc.cinfo.dest).empty_output_buffer = Some(empty_output_buffer::<W>);
+            (*enc.cinfo.dest).term_destination = Some(term_destination::<W>);
+        }
+        enc
+    }
+}
+*/
+
+impl<R> MozJPEGEncoder<R> {
+    fn new(w: R) -> MozJPEGEncoder<R> {
+        let mut enc = MozJPEGEncoder {
+            cdata: cell::UnsafeCell::new(EncClientData {
+                writer: w,
+                buffer: [0; OUT_BUF_SIZE],
+            }),
+            err: unsafe { mem::zeroed() },
+            cinfo: unsafe { mem::zeroed() },
+            cleanup: None,
+            quality: 85,
+            jpgcrush: true,
+            trellis: true,
+            trellis_dc: true,
+            trellis_eob_opt: true,
+            trellis_q_opt: true,
+            trellis_scans: true,
+            deringing: true,
+        };
+        let size: size_t = mem::size_of_val(&enc.cinfo);
+        enc.cinfo.common.err = unsafe { jpeg_std_error(&mut enc.err) };
+        unsafe {
+            jpeg_CreateCompress(&mut enc.cinfo, JPEG_LIB_VERSION, size);
+        }
+        enc.cinfo.common.client_data = &mut enc.cdata as *mut _ as *mut c_void;
+        enc
+    }
+
+    pub fn encode(&mut self, image: &[u8], width: u32, height: u32, c: ColorType) -> bool {
+        self.cinfo.image_width = width;
+        self.cinfo.image_height = height;
+        match c {
+            Gray(n) => {
+                self.cinfo.input_components = n as i32 / 8;
+                self.cinfo.in_color_space = J_COLOR_SPACE::JCS_GRAYSCALE;
+            },
+            RGB(n) => {
+                self.cinfo.input_components = n as i32 / 8 * 3;
+                self.cinfo.in_color_space = J_COLOR_SPACE::JCS_RGB;
+            },
+            RGBA(n) => {
+                self.cinfo.input_components = n as i32 / 8 * 4;
+                self.cinfo.in_color_space = J_COLOR_SPACE::JCS_EXT_RGBA;
+            },
+            _ => return false,
+        }
+        unsafe {
+            jpeg_set_defaults(&mut self.cinfo);
+            self.cinfo.dct_method = J_DCT_METHOD::JDCT_ISLOW;
+            jpeg_c_set_bool_param(&mut self.cinfo, JBOOLEAN_OPTIMIZE_SCANS, self.jpgcrush as boolean);
+            if self.jpgcrush {
+                jpeg_simple_progression(&mut self.cinfo);
+            }
+            jpeg_c_set_bool_param(&mut self.cinfo, JBOOLEAN_TRELLIS_QUANT, self.trellis as boolean);
+            jpeg_c_set_bool_param(&mut self.cinfo, JBOOLEAN_TRELLIS_QUANT_DC, self.trellis_dc as boolean);
+            jpeg_c_set_bool_param(&mut self.cinfo, JBOOLEAN_TRELLIS_EOB_OPT, self.trellis_eob_opt as boolean);
+            jpeg_c_set_bool_param(&mut self.cinfo, JBOOLEAN_TRELLIS_Q_OPT, self.trellis_q_opt as boolean);
+            jpeg_c_set_bool_param(&mut self.cinfo, JBOOLEAN_USE_SCANS_IN_TRELLIS, self.trellis_scans as boolean);
+            jpeg_c_set_bool_param(&mut self.cinfo, JBOOLEAN_OVERSHOOT_DERINGING, self.deringing as boolean);
+            jpeg_set_quality(&mut self.cinfo, self.quality as c_int, true as boolean);
+            jpeg_start_compress(&mut self.cinfo, true as boolean);
+            let stride = self.cinfo.image_width as isize * self.cinfo.input_components as isize;
+            let mut bufp = image.as_ptr() as *const u8;
+            while self.cinfo.next_scanline < self.cinfo.image_height {
+                let sl = self.cinfo.next_scanline as isize;
+                bufp = image.as_ptr().offset(sl * stride);
+                jpeg_write_scanlines(&mut self.cinfo, &bufp, 1);
+            }
+            jpeg_finish_compress(&mut self.cinfo);
+        };
+        true
+    }
+}
+
+impl<R> Drop for MozJPEGEncoder<R> {
+    #[inline]
+    fn drop(&mut self) {
+        unsafe { jpeg_destroy_compress(&mut self.cinfo) }
+        if let Some(f) = self.cleanup {
+            f(self)
+        }
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,7 +405,6 @@ mod tests {
         } else {
             panic!("wtf");
         }
-
     }
 
     #[test]
@@ -260,4 +420,5 @@ mod tests {
         let mut dec = MozJPEGDecoder::for_slice(&vc);
         tests_for_example_jpg(&mut dec);
     }
+
 }
