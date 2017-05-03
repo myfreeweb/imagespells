@@ -5,6 +5,7 @@ use libc;
 use image::*;
 use mozjpeg_sys::*;
 use meta::*;
+use srcs::*;
 
 struct ClientData<R> {
     reader: R,
@@ -84,12 +85,20 @@ fn cleanup_fd(dec: &mut MozJPEGDecoder<*mut libc::FILE>) {
     unsafe { libc::fclose((*dec.cdata.get()).reader) };
 }
 
-impl MozJPEGDecoder<*mut libc::FILE> {
-    pub fn for_file(r: fs::File) -> MozJPEGDecoder<*mut libc::FILE> {
+impl DecoderFromFile for MozJPEGDecoder<*mut libc::FILE> {
+    fn for_file(r: fs::File) -> MozJPEGDecoder<*mut libc::FILE> {
         let fd = unsafe { libc::fdopen(r.into_raw_fd(), ffi::CString::new("rb").unwrap().as_ptr()) };
         let mut dec = MozJPEGDecoder::new(fd);
         unsafe { jpeg_stdio_src(&mut dec.cinfo, fd); }
         dec.cleanup = Some(cleanup_fd);
+        dec
+    }
+}
+
+impl<'a> DecoderFromMemory<'a> for MozJPEGDecoder<&'a [u8]> {
+    fn for_slice(r: &[u8]) -> MozJPEGDecoder<&[u8]> {
+        let mut dec = MozJPEGDecoder::new(r);
+        unsafe { jpeg_mem_src(&mut dec.cinfo, r.as_ptr(), r.len() as c_ulong); }
         dec
     }
 }
@@ -172,7 +181,7 @@ impl<R> MetadataDecoder for MozJPEGDecoder<R> {
 impl<R> ImageDecoder for MozJPEGDecoder<R> {
     fn dimensions(&mut self) -> ImageResult<(u32, u32)> {
         self.ensure_header();
-        Ok((self.cinfo.output_width as u32, self.cinfo.output_height as u32))
+        Ok((self.cinfo.output_width as c_uint, self.cinfo.output_height as c_uint))
     }
 
     fn colortype(&mut self) -> ImageResult<ColorType> {
@@ -223,10 +232,9 @@ impl<R> ImageDecoder for MozJPEGDecoder<R> {
 mod tests {
     use super::*;
     use std::fs::*;
+    use std::io::Read;
 
-    #[test]
-    fn test_decode() {
-        let mut dec = MozJPEGDecoder::for_file(File::open("fixtures/example.jpg").unwrap());
+    fn tests_for_example_jpg<R>(dec: &mut MozJPEGDecoder<R>) {
         assert_eq!(dec.raw_metadata().first().unwrap(), &(MetadataType::Comment, &b"Created with GIMP"[..]));
         assert_eq!(dec.dimensions().unwrap(), (4, 4));
         assert_eq!(dec.colortype().unwrap(), ColorType::RGB(8));
@@ -236,5 +244,20 @@ mod tests {
         } else {
             panic!("wtf");
         }
+
+    }
+
+    #[test]
+    fn test_decode_file() {
+        let mut dec = MozJPEGDecoder::for_file(File::open("fixtures/example.jpg").unwrap());
+        tests_for_example_jpg(&mut dec);
+    }
+
+    #[test]
+    fn test_decode_mem() {
+        let mut vc = Vec::new();
+        File::open("fixtures/example.jpg").unwrap().read_to_end(&mut vc).unwrap();
+        let mut dec = MozJPEGDecoder::for_slice(&vc);
+        tests_for_example_jpg(&mut dec);
     }
 }
